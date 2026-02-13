@@ -8,10 +8,14 @@ FROM alpine:${ALPINE_VERSION} AS ta-lib-builder
 ARG TA_LIB_VERSION
 
 RUN apk add --no-cache \
-    wget tar make gcc g++ musl-dev autoconf automake
+    curl tar make gcc g++ musl-dev autoconf automake
 
-RUN wget http://prdownloads.sourceforge.net/ta-lib/ta-lib-${TA_LIB_VERSION}-src.tar.gz && \
-    tar -xzf ta-lib-${TA_LIB_VERSION}-src.tar.gz && \
+RUN set -eux; \
+    TA_TGZ="ta-lib-${TA_LIB_VERSION}-src.tar.gz"; \
+    (curl -fsSL "https://prdownloads.sourceforge.net/ta-lib/${TA_TGZ}" -o "${TA_TGZ}" || \
+     curl -fsSL "https://downloads.sourceforge.net/project/ta-lib/ta-lib/${TA_LIB_VERSION}/${TA_TGZ}" -o "${TA_TGZ}" || \
+     curl -fsSL "https://sourceforge.net/projects/ta-lib/files/ta-lib/${TA_LIB_VERSION}/${TA_TGZ}/download" -o "${TA_TGZ}"); \
+    tar -xzf "${TA_TGZ}" && \
     cd ta-lib && \
     if [ "$(uname -m)" = "aarch64" ]; then \
         CONFIG_GUESS=$(find /usr/share -name config.guess | head -1) && \
