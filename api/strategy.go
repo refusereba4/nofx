@@ -15,6 +15,48 @@ import (
 	"github.com/google/uuid"
 )
 
+var defaultTPLevels = []store.TakeProfitLevelConfig{
+	{TargetROEPct: 0.5, ClosePct: 20},
+	{TargetROEPct: 1.0, ClosePct: 20},
+	{TargetROEPct: 2.0, ClosePct: 30},
+	{TargetROEPct: 3.0, ClosePct: 20},
+}
+
+var defaultStagedSL = store.StagedStopLossConfig{
+	InitialROEPct:  -1.6,
+	AfterTP1ROEPct: -0.55,
+	AfterTP2ROEPct: 0.1,
+}
+
+func normalizeStrategyForPersistence(config *store.StrategyConfig) {
+	if config == nil {
+		return
+	}
+
+	levels := make([]store.TakeProfitLevelConfig, 0, 4)
+	for i := 0; i < len(config.RiskControl.TakeProfitLevels) && len(levels) < 4; i++ {
+		level := config.RiskControl.TakeProfitLevels[i]
+		if level.TargetROEPct <= 0 {
+			level.TargetROEPct = defaultTPLevels[len(levels)].TargetROEPct
+		}
+		if level.ClosePct < 0 {
+			level.ClosePct = defaultTPLevels[len(levels)].ClosePct
+		}
+		levels = append(levels, level)
+	}
+	for len(levels) < 4 {
+		levels = append(levels, defaultTPLevels[len(levels)])
+	}
+	config.RiskControl.TakeProfitLevels = levels
+
+	sl := config.RiskControl.StagedStopLoss
+	if sl == (store.StagedStopLossConfig{}) {
+		config.RiskControl.StagedStopLoss = defaultStagedSL
+	} else {
+		config.RiskControl.StagedStopLoss = sl
+	}
+}
+
 // validateStrategyConfig validates strategy configuration and returns warnings
 func validateStrategyConfig(config *store.StrategyConfig) []string {
 	var warnings []string
@@ -26,7 +68,71 @@ func validateStrategyConfig(config *store.StrategyConfig) []string {
 		warnings = append(warnings, "NofxOS API key is not configured. NofxOS data sources may not work properly.")
 	}
 
+	// Validate staged take-profit ratio total
+	if len(config.RiskControl.TakeProfitLevels) > 0 {
+		totalClose := 0.0
+		for _, level := range config.RiskControl.TakeProfitLevels {
+			totalClose += level.ClosePct
+		}
+		if totalClose > 100 {
+			warnings = append(warnings, "take_profit_levels total close_pct is > 100%; backend will normalize ratios automatically.")
+		}
+	}
+
 	return warnings
+}
+
+// reloadTradersByStrategy reloads in-memory traders for a user's specific strategy
+// so strategy edits can take effect without restarting backend service.
+func (s *Server) reloadTradersByStrategy(userID, strategyID string) {
+	traders, err := s.store.Trader().List(userID)
+	if err != nil {
+		logger.Infof("⚠️ Failed to list traders for strategy reload (user=%s, strategy=%s): %v", userID, strategyID, err)
+		return
+	}
+
+	affected := 0
+	needRestart := make(map[string]bool)
+	for _, tr := range traders {
+		if tr.StrategyID != strategyID {
+			continue
+		}
+		affected++
+		if tr.IsRunning {
+			needRestart[tr.ID] = true
+		}
+
+		if memTrader, getErr := s.traderManager.GetTrader(tr.ID); getErr == nil && memTrader != nil {
+			status := memTrader.GetStatus()
+			if running, ok := status["is_running"].(bool); ok && running {
+				needRestart[tr.ID] = true
+			}
+		}
+
+		s.traderManager.RemoveTrader(tr.ID)
+	}
+
+	if affected == 0 {
+		return
+	}
+
+	if err := s.traderManager.LoadUserTradersFromStore(s.store, userID); err != nil {
+		logger.Infof("⚠️ Failed to reload user traders after strategy update (user=%s): %v", userID, err)
+	}
+
+	for traderID := range needRestart {
+		reloadedTrader, getErr := s.traderManager.GetTrader(traderID)
+		if getErr != nil || reloadedTrader == nil {
+			continue
+		}
+		rt := reloadedTrader
+		go func(id string) {
+			logger.Infof("▶️ Restarting trader %s after strategy update", id)
+			if runErr := rt.Run(); runErr != nil {
+				logger.Infof("❌ Trader %s runtime error after strategy update: %v", id, runErr)
+			}
+		}(traderID)
+	}
 }
 
 // handlePublicStrategies Get public strategies for strategy market (no auth required)
@@ -154,6 +260,7 @@ func (s *Server) handleCreateStrategy(c *gin.Context) {
 		SafeBadRequest(c, "Invalid request parameters")
 		return
 	}
+	normalizeStrategyForPersistence(&req.Config)
 
 	// Serialize configuration
 	configJSON, err := json.Marshal(req.Config)
@@ -224,6 +331,7 @@ func (s *Server) handleUpdateStrategy(c *gin.Context) {
 		SafeBadRequest(c, "Invalid request parameters")
 		return
 	}
+	normalizeStrategyForPersistence(&req.Config)
 
 	// Serialize configuration
 	configJSON, err := json.Marshal(req.Config)
@@ -246,6 +354,11 @@ func (s *Server) handleUpdateStrategy(c *gin.Context) {
 		SafeInternalError(c, "Failed to update strategy", err)
 		return
 	}
+	logger.Infof("🧩 Strategy %s saved risk exits: tp_levels=%v staged_sl=%+v",
+		strategyID, req.Config.RiskControl.TakeProfitLevels, req.Config.RiskControl.StagedStopLoss)
+
+	// Hot-reload traders that use this strategy (no service restart required).
+	s.reloadTradersByStrategy(userID, strategyID)
 
 	// Validate configuration and collect warnings
 	warnings := validateStrategyConfig(&req.Config)
@@ -290,6 +403,9 @@ func (s *Server) handleActivateStrategy(c *gin.Context) {
 		SafeInternalError(c, "Failed to activate strategy", err)
 		return
 	}
+
+	// Also reload traders using this strategy so active config updates apply immediately.
+	s.reloadTradersByStrategy(userID, strategyID)
 
 	c.JSON(http.StatusOK, gin.H{"message": "Strategy activated successfully"})
 }
@@ -377,9 +493,9 @@ func (s *Server) handlePreviewPrompt(c *gin.Context) {
 	}
 
 	var req struct {
-		Config          store.StrategyConfig `json:"config" binding:"required"`
-		AccountEquity   float64              `json:"account_equity"`
-		PromptVariant   string               `json:"prompt_variant"`
+		Config        store.StrategyConfig `json:"config" binding:"required"`
+		AccountEquity float64              `json:"account_equity"`
+		PromptVariant string               `json:"prompt_variant"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -639,4 +755,3 @@ func (s *Server) runRealAITest(userID, modelID, systemPrompt, userPrompt string)
 
 	return response, nil
 }
-

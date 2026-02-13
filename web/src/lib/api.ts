@@ -30,6 +30,7 @@ import type {
   DebateVote,
   DebatePersonalityInfo,
   PositionHistoryResponse,
+  RiskAPICallLogsResponse,
 } from '../types'
 import { CryptoService } from './crypto'
 import { httpClient } from './httpClient'
@@ -397,6 +398,14 @@ export const api = {
       : `${API_BASE}/statistics`
     const result = await httpClient.get<Statistics>(url)
     if (!result.success) throw new Error('获取统计信息失败')
+    return result.data!
+  },
+
+  async getRiskAPICallLogs(limit = 30): Promise<RiskAPICallLogsResponse> {
+    const result = await httpClient.get<RiskAPICallLogsResponse>(
+      `${API_BASE}/logs/api-calls?limit=${limit}`
+    )
+    if (!result.success) throw new Error('获取 API 调用日志失败')
     return result.data!
   },
 

@@ -10,6 +10,7 @@ import (
 	"nofx/logger"
 	"nofx/manager"
 	"nofx/mcp"
+	"nofx/risk_control"
 	"nofx/store"
 	"os"
 	"os/signal"
@@ -135,6 +136,10 @@ func main() {
 			logger.Fatalf("❌ Failed to start API server: %v", err)
 		}
 	}()
+
+	// Start Risk Control Service (Dedicated background watcher)
+	riskWatcher := risk_control.NewRiskWatcher(traderManager)
+	riskWatcher.Start()
 
 	// Wait for interrupt signal
 	quit := make(chan os.Signal, 1)

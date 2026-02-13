@@ -42,6 +42,49 @@ import { DeepVoidBackground } from '../components/DeepVoidBackground'
 
 const API_BASE = import.meta.env.VITE_API_BASE || ''
 
+const DEFAULT_TP_LEVELS = [
+  { target_roe_pct: 0.5, close_pct: 20 },
+  { target_roe_pct: 1.0, close_pct: 20 },
+  { target_roe_pct: 2.0, close_pct: 30 },
+  { target_roe_pct: 3.0, close_pct: 20 },
+]
+
+const DEFAULT_STAGED_SL = {
+  initial_roe_pct: -1.6,
+  after_tp1_roe_pct: -0.55,
+  after_tp2_roe_pct: 0.1,
+}
+
+function normalizeStrategyConfig(config: StrategyConfig): StrategyConfig {
+  const risk = config.risk_control || ({} as StrategyConfig['risk_control'])
+  const levels = Array.isArray(risk.take_profit_levels) ? [...risk.take_profit_levels] : []
+  for (let i = levels.length; i < 4; i++) {
+    levels.push({ ...DEFAULT_TP_LEVELS[i] })
+  }
+
+  return {
+    ...config,
+    risk_control: {
+      ...risk,
+      take_profit_levels: levels.slice(0, 4).map((l, idx) => ({
+        target_roe_pct: Number.isFinite(l.target_roe_pct) ? l.target_roe_pct : DEFAULT_TP_LEVELS[idx].target_roe_pct,
+        close_pct: Number.isFinite(l.close_pct) ? l.close_pct : DEFAULT_TP_LEVELS[idx].close_pct,
+      })),
+      staged_stop_loss: {
+        initial_roe_pct: Number.isFinite(risk.staged_stop_loss?.initial_roe_pct)
+          ? risk.staged_stop_loss!.initial_roe_pct
+          : DEFAULT_STAGED_SL.initial_roe_pct,
+        after_tp1_roe_pct: Number.isFinite(risk.staged_stop_loss?.after_tp1_roe_pct)
+          ? risk.staged_stop_loss!.after_tp1_roe_pct
+          : DEFAULT_STAGED_SL.after_tp1_roe_pct,
+        after_tp2_roe_pct: Number.isFinite(risk.staged_stop_loss?.after_tp2_roe_pct)
+          ? risk.staged_stop_loss!.after_tp2_roe_pct
+          : DEFAULT_STAGED_SL.after_tp2_roe_pct,
+      },
+    },
+  }
+}
+
 export function StrategyStudioPage() {
   const { token } = useAuth()
   const { language } = useLanguage()
@@ -130,16 +173,20 @@ export function StrategyStudioPage() {
       })
       if (!response.ok) throw new Error('Failed to fetch strategies')
       const data = await response.json()
-      setStrategies(data.strategies || [])
+      const normalizedStrategies = (data.strategies || []).map((s: Strategy) => ({
+        ...s,
+        config: normalizeStrategyConfig(s.config),
+      }))
+      setStrategies(normalizedStrategies)
 
       // Select active or first strategy
-      const active = data.strategies?.find((s: Strategy) => s.is_active)
+      const active = normalizedStrategies.find((s: Strategy) => s.is_active)
       if (active) {
         setSelectedStrategy(active)
-        setEditingConfig(active.config)
-      } else if (data.strategies?.length > 0) {
-        setSelectedStrategy(data.strategies[0])
-        setEditingConfig(data.strategies[0].config)
+        setEditingConfig(normalizeStrategyConfig(active.config))
+      } else if (normalizedStrategies.length > 0) {
+        setSelectedStrategy(normalizedStrategies[0])
+        setEditingConfig(normalizeStrategyConfig(normalizedStrategies[0].config))
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error')
@@ -201,6 +248,7 @@ export function StrategyStudioPage() {
         { headers: { Authorization: `Bearer ${token}` } }
       )
       const defaultConfig = await configResponse.json()
+      const normalizedDefaultConfig = normalizeStrategyConfig(defaultConfig)
 
       const response = await fetch(`${API_BASE}/api/strategies`, {
         method: 'POST',
@@ -211,7 +259,7 @@ export function StrategyStudioPage() {
         body: JSON.stringify({
           name: language === 'zh' ? '新策略' : 'New Strategy',
           description: '',
-          config: defaultConfig,
+          config: normalizedDefaultConfig,
         }),
       })
       if (!response.ok) throw new Error('Failed to create strategy')
@@ -228,12 +276,12 @@ export function StrategyStudioPage() {
           is_default: false,
           is_public: false,
           config_visible: true,
-          config: defaultConfig,
+          config: normalizedDefaultConfig,
           created_at: now,
           updated_at: now,
         }
         setSelectedStrategy(newStrategy)
-        setEditingConfig(defaultConfig)
+        setEditingConfig(normalizedDefaultConfig)
         setHasChanges(false)
       }
     } catch (err) {
@@ -357,7 +405,7 @@ export function StrategyStudioPage() {
         body: JSON.stringify({
           name: `${importData.name} (${language === 'zh' ? '导入' : 'Imported'})`,
           description: importData.description || '',
-          config: importData.config,
+          config: normalizeStrategyConfig(importData.config),
         }),
       })
       if (!response.ok) throw new Error('Failed to import strategy')
@@ -380,7 +428,7 @@ export function StrategyStudioPage() {
     try {
       // Always sync the config language with the current interface language
       const configWithLanguage = {
-        ...editingConfig,
+        ...normalizeStrategyConfig(editingConfig),
         language: language as 'zh' | 'en',
       }
       const response = await fetch(
@@ -729,7 +777,7 @@ export function StrategyStudioPage() {
                   key={strategy.id}
                   onClick={() => {
                     setSelectedStrategy(strategy)
-                    setEditingConfig(strategy.config)
+                    setEditingConfig(normalizeStrategyConfig(strategy.config))
                     setHasChanges(false)
                     setPromptPreview(null)
                     setAiTestResult(null)

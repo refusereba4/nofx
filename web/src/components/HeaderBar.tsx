@@ -15,6 +15,7 @@ type Page =
   | 'strategy-market'
   | 'data'
   | 'debate'
+  | 'logs'
   | 'faq'
   | 'login'
   | 'register'
@@ -107,6 +108,7 @@ export default function HeaderBar({
                 { page: 'competition', path: '/competition', label: t('realtimeNav', language), requiresAuth: true },
                 { page: 'debate', path: '/debate', label: t('debateNav', language), requiresAuth: true },
                 { page: 'backtest', path: '/backtest', label: 'Backtest', requiresAuth: true },
+                { page: 'logs', path: '/logs', label: 'Log', requiresAuth: true },
                 { page: 'faq', path: '/faq', label: t('faqNav', language), requiresAuth: false },
               ]
 
@@ -337,6 +339,7 @@ export default function HeaderBar({
                     { page: 'competition', path: '/competition', label: t('realtimeNav', language), requiresAuth: true },
                     { page: 'debate', path: '/debate', label: t('debateNav', language), requiresAuth: true },
                     { page: 'backtest', path: '/backtest', label: 'Backtest', requiresAuth: true },
+                    { page: 'logs', path: '/logs', label: 'Log', requiresAuth: true },
                     { page: 'faq', path: '/faq', label: t('faqNav', language), requiresAuth: false },
                   ]
 

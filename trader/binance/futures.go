@@ -162,8 +162,51 @@ func (t *FuturesTrader) GetBalance() (map[string]interface{}, error) {
 	return result, nil
 }
 
+// GetAllSymbols returns all trading symbols from exchange info
+func (t *FuturesTrader) GetAllSymbols() ([]string, error) {
+	info, err := t.client.NewExchangeInfoService().Do(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("failed to get exchange info: %w", err)
+	}
+
+	var symbols []string
+	for _, s := range info.Symbols {
+		symbols = append(symbols, s.Symbol)
+	}
+	return symbols, nil
+}
+
+// GetRecentTradedSymbols returns symbols that have been traded recently (last 24h)
+func (t *FuturesTrader) GetRecentTradedSymbols() ([]string, error) {
+	// defaults to last 7 days usually, or we can limit count
+	trades, err := t.client.NewListAccountTradeService().Limit(500).Do(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("failed to get user trades: %w", err)
+	}
+
+	symbolMap := make(map[string]bool)
+	for _, trade := range trades {
+		symbolMap[trade.Symbol] = true
+	}
+
+	var symbols []string
+	for s := range symbolMap {
+		symbols = append(symbols, s)
+	}
+	return symbols, nil
+}
+
 // GetPositions gets all positions (with cache)
 func (t *FuturesTrader) GetPositions() ([]map[string]interface{}, error) {
+	return t.getPositions(false)
+}
+
+// GetPositionsForRiskWatcher gets positions for risk watcher and records API call stats.
+func (t *FuturesTrader) GetPositionsForRiskWatcher() ([]map[string]interface{}, error) {
+	return t.getPositions(true)
+}
+
+func (t *FuturesTrader) getPositions(recordRiskMetrics bool) ([]map[string]interface{}, error) {
 	// First check if cache is valid
 	t.positionsCacheMutex.RLock()
 	if t.cachedPositions != nil && time.Since(t.positionsCacheTime) < t.cacheDuration {
@@ -176,6 +219,9 @@ func (t *FuturesTrader) GetPositions() ([]map[string]interface{}, error) {
 
 	// Cache expired or doesn't exist, call API
 	logger.Infof("🔄 Cache expired, calling Binance API to get position information...")
+	if recordRiskMetrics {
+		RecordRiskAPICall("positionRisk")
+	}
 	positions, err := t.client.NewGetPositionRiskService().Do(context.Background())
 	if err != nil {
 		return nil, fmt.Errorf("failed to get positions: %w", err)
@@ -185,7 +231,7 @@ func (t *FuturesTrader) GetPositions() ([]map[string]interface{}, error) {
 	for _, pos := range positions {
 		posAmt, _ := strconv.ParseFloat(pos.PositionAmt, 64)
 		if posAmt == 0 {
-			continue // Skip positions with zero amount
+			continue
 		}
 
 		posMap := make(map[string]interface{})
@@ -610,6 +656,93 @@ func (t *FuturesTrader) CancelStopLossOrders(symbol string) error {
 	return nil
 }
 
+// CancelStopLossOrdersForSide cancels stop-loss orders only for one position side (LONG/SHORT).
+// This avoids affecting the opposite side in hedge mode.
+func (t *FuturesTrader) CancelStopLossOrdersForSide(symbol, positionSide string) error {
+	side := strings.ToUpper(strings.TrimSpace(positionSide))
+	if side == "" {
+		return fmt.Errorf("position side is required")
+	}
+
+	canceledCount := 0
+	var cancelErrors []error
+
+	// 1. Cancel legacy stop-loss orders
+	orders, err := t.client.NewListOpenOrdersService().
+		Symbol(symbol).
+		Do(context.Background())
+
+	if err == nil {
+		for _, order := range orders {
+			orderType := string(order.Type)
+			orderPosSide := strings.ToUpper(string(order.PositionSide))
+
+			if orderPosSide != side {
+				continue
+			}
+
+			if orderType == "STOP_MARKET" || orderType == "STOP" {
+				_, err := t.client.NewCancelOrderService().
+					Symbol(symbol).
+					OrderID(order.OrderID).
+					Do(context.Background())
+
+				if err != nil {
+					errMsg := fmt.Sprintf("Order ID %d: %v", order.OrderID, err)
+					cancelErrors = append(cancelErrors, fmt.Errorf("%s", errMsg))
+					logger.Infof("  ⚠ Failed to cancel legacy stop-loss order (%s): %s", side, errMsg)
+					continue
+				}
+
+				canceledCount++
+				logger.Infof("  ✓ Canceled legacy stop-loss order (%s) (Order ID: %d, Type: %s)", side, order.OrderID, orderType)
+			}
+		}
+	}
+
+	// 2. Cancel Algo stop-loss orders
+	algoOrders, err := t.client.NewListOpenAlgoOrdersService().
+		Symbol(symbol).
+		Do(context.Background())
+
+	if err == nil {
+		for _, algoOrder := range algoOrders {
+			algoPosSide := strings.ToUpper(string(algoOrder.PositionSide))
+			if algoPosSide != side {
+				continue
+			}
+
+			if algoOrder.OrderType == futures.AlgoOrderTypeStopMarket || algoOrder.OrderType == futures.AlgoOrderTypeStop {
+				_, err := t.client.NewCancelAlgoOrderService().
+					AlgoID(algoOrder.AlgoId).
+					Do(context.Background())
+
+				if err != nil {
+					errMsg := fmt.Sprintf("Algo ID %d: %v", algoOrder.AlgoId, err)
+					cancelErrors = append(cancelErrors, fmt.Errorf("%s", errMsg))
+					logger.Infof("  ⚠ Failed to cancel Algo stop-loss order (%s): %s", side, errMsg)
+					continue
+				}
+
+				canceledCount++
+				logger.Infof("  ✓ Canceled Algo stop-loss order (%s) (Algo ID: %d, Type: %s)", side, algoOrder.AlgoId, algoOrder.OrderType)
+			}
+		}
+	}
+
+	if canceledCount == 0 && len(cancelErrors) == 0 {
+		logger.Infof("  ℹ %s %s has no stop-loss orders to cancel", symbol, side)
+	} else if canceledCount > 0 {
+		logger.Infof("  ✓ Canceled %d stop-loss order(s) for %s %s", canceledCount, symbol, side)
+	}
+
+	if len(cancelErrors) > 0 && canceledCount == 0 {
+		return fmt.Errorf("failed to cancel stop-loss orders for side %s: %v", side, cancelErrors)
+	}
+
+	return nil
+}
+
 // CancelTakeProfitOrders cancels only take-profit orders (doesn't affect stop-loss orders)
 // Now uses both legacy API and new Algo Order API
 func (t *FuturesTrader) CancelTakeProfitOrders(symbol string) error {
@@ -727,10 +860,8 @@ func (t *FuturesTrader) PlaceLimitOrder(req *types.LimitOrderRequest) (*types.Li
 	}
 
 	// Format price to correct precision
-	priceStr, err := t.FormatPrice(req.Symbol, req.Price)
-	if err != nil {
-		return nil, fmt.Errorf("failed to format price: %w", err)
-	}
+	// Format price to correct precision
+	priceStr := t.FormatPrice(req.Symbol, req.Price)
 
 	// Set leverage if specified
 	if req.Leverage > 0 {
@@ -897,10 +1028,87 @@ func (t *FuturesTrader) CancelStopOrders(symbol string) error {
 }
 
 // GetOpenOrders gets all open/pending orders for a symbol
+// GetAllOpenOrders fetches ALL open orders for ALL symbols (Standard Orders only)
+func (t *FuturesTrader) GetAllOpenOrders() ([]types.OpenOrder, error) {
+	var result []types.OpenOrder
+
+	// Get all open orders (no symbol specified)
+	orders, err := t.client.NewListOpenOrdersService().Do(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("failed to get all open orders: %w", err)
+	}
+
+	for _, order := range orders {
+		price, _ := strconv.ParseFloat(order.Price, 64)
+		stopPrice, _ := strconv.ParseFloat(order.StopPrice, 64)
+		quantity, _ := strconv.ParseFloat(order.OrigQuantity, 64)
+
+		result = append(result, types.OpenOrder{
+			OrderID:      fmt.Sprintf("%d", order.OrderID),
+			Symbol:       order.Symbol,
+			Side:         string(order.Side),
+			PositionSide: string(order.PositionSide),
+			Type:         string(order.Type),
+			Price:        price,
+			StopPrice:    stopPrice,
+			Quantity:     quantity,
+			Status:       string(order.Status),
+		})
+	}
+
+	return result, nil
+}
+
+// GetRiskOrderSymbolsForRiskWatcher returns symbols that currently have risk orders
+// (STOP/TAKE_PROFIT in both standard orders and algo orders).
+// This is used by risk watcher to cleanup orphan orders even after service restart.
+func (t *FuturesTrader) GetRiskOrderSymbolsForRiskWatcher() (map[string]int, error) {
+	symbolCounts := make(map[string]int)
+
+	RecordRiskAPICall("openOrders.standard")
+	orders, err := t.client.NewListOpenOrdersService().Do(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("failed to list all open standard orders: %w", err)
+	}
+	for _, order := range orders {
+		orderType := string(order.Type)
+		if orderType == "STOP_MARKET" || orderType == "TAKE_PROFIT_MARKET" || orderType == "STOP" || orderType == "TAKE_PROFIT" {
+			symbolCounts[order.Symbol]++
+		}
+	}
+
+	RecordRiskAPICall("openOrders.algo")
+	algoOrders, err := t.client.NewListOpenAlgoOrdersService().Do(context.Background())
+	if err != nil {
+		return symbolCounts, nil
+	}
+	for _, algoOrder := range algoOrders {
+		orderType := string(algoOrder.OrderType)
+		if orderType == "STOP_MARKET" || orderType == "TAKE_PROFIT_MARKET" || orderType == "STOP" || orderType == "TAKE_PROFIT" {
+			symbolCounts[algoOrder.Symbol]++
+		}
+	}
+
+	return symbolCounts, nil
+}
+
+// GetOpenOrders gets open orders for a specific symbol
 func (t *FuturesTrader) GetOpenOrders(symbol string) ([]types.OpenOrder, error) {
+	return t.getOpenOrders(symbol, false)
+}
+
+// GetOpenOrdersForRiskWatcher gets open orders and records risk watcher API call stats.
+func (t *FuturesTrader) GetOpenOrdersForRiskWatcher(symbol string) ([]types.OpenOrder, error) {
+	return t.getOpenOrders(symbol, true)
+}
+
+func (t *FuturesTrader) getOpenOrders(symbol string, recordRiskMetrics bool) ([]types.OpenOrder, error) {
 	var result []types.OpenOrder
 
 	// 1. Get legacy open orders
+	if recordRiskMetrics {
+		RecordRiskAPICall("openOrders.standard")
+	}
 	orders, err := t.client.NewListOpenOrdersService().
 		Symbol(symbol).
 		Do(context.Background())
@@ -928,6 +1136,9 @@ func (t *FuturesTrader) GetOpenOrders(symbol string) ([]types.OpenOrder, error) 
 	}
 
 	// 2. Get Algo orders (new API for stop-loss/take-profit)
+	if recordRiskMetrics {
+		RecordRiskAPICall("openOrders.algo")
+	}
 	algoOrders, err := t.client.NewListOpenAlgoOrdersService().
 		Symbol(symbol).
 		Do(context.Background())
@@ -1001,7 +1212,9 @@ func (t *FuturesTrader) SetStopLoss(symbol string, positionSide string, quantity
 		Side(side).
 		PositionSide(posSide).
 		Type(futures.AlgoOrderTypeStopMarket).
-		TriggerPrice(fmt.Sprintf("%.8f", stopPrice)).
+		Type(futures.AlgoOrderTypeStopMarket).
+		TriggerPrice(t.FormatPrice(symbol, stopPrice)).
+		WorkingType(futures.WorkingTypeContractPrice).
 		WorkingType(futures.WorkingTypeContractPrice).
 		ClosePosition(true).
 		ClientAlgoId(getBrOrderID()).
@@ -1035,7 +1248,9 @@ func (t *FuturesTrader) SetTakeProfit(symbol string, positionSide string, quanti
 		Side(side).
 		PositionSide(posSide).
 		Type(futures.AlgoOrderTypeTakeProfitMarket).
-		TriggerPrice(fmt.Sprintf("%.8f", takeProfitPrice)).
+		Type(futures.AlgoOrderTypeTakeProfitMarket).
+		TriggerPrice(t.FormatPrice(symbol, takeProfitPrice)).
+		WorkingType(futures.WorkingTypeContractPrice).
 		WorkingType(futures.WorkingTypeContractPrice).
 		ClosePosition(true).
 		ClientAlgoId(getBrOrderID()).
@@ -1180,15 +1395,21 @@ func (t *FuturesTrader) GetSymbolPricePrecision(symbol string) (int, error) {
 }
 
 // FormatPrice formats price to correct precision
-func (t *FuturesTrader) FormatPrice(symbol string, price float64) (string, error) {
+// FormatPrice formats price to correct precision
+func (t *FuturesTrader) FormatPrice(symbol string, price float64) string {
 	precision, err := t.GetSymbolPricePrecision(symbol)
 	if err != nil {
-		// If retrieval fails, use default format
-		return fmt.Sprintf("%.2f", price), nil
+		// If retrieval fails, use sensible default
+		if price > 1000 {
+			return fmt.Sprintf("%.2f", price)
+		} else if price < 0.01 {
+			return fmt.Sprintf("%.6f", price)
+		}
+		return fmt.Sprintf("%.4f", price)
 	}
 
 	format := fmt.Sprintf("%%.%df", precision)
-	return fmt.Sprintf(format, price), nil
+	return fmt.Sprintf(format, price)
 }
 
 // Helper functions

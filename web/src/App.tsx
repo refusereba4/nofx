@@ -15,6 +15,7 @@ import { StrategyStudioPage } from './pages/StrategyStudioPage'
 import { DebateArenaPage } from './pages/DebateArenaPage'
 import { StrategyMarketPage } from './pages/StrategyMarketPage'
 import { DataPage } from './pages/DataPage'
+import { LogsPage } from './pages/LogsPage'
 import { LoginRequiredOverlay } from './components/LoginRequiredOverlay'
 import HeaderBar from './components/HeaderBar'
 import { LanguageProvider, useLanguage } from './contexts/LanguageContext'
@@ -44,6 +45,7 @@ type Page =
   | 'strategy-market'
   | 'data'
   | 'debate'
+  | 'logs'
   | 'faq'
   | 'login'
   | 'register'
@@ -72,6 +74,7 @@ function App() {
     if (path === '/strategy-market' || hash === 'strategy-market') return 'strategy-market'
     if (path === '/data' || hash === 'data') return 'data'
     if (path === '/debate' || hash === 'debate') return 'debate'
+    if (path === '/logs' || hash === 'logs') return 'logs'
     if (path === '/dashboard' || hash === 'trader' || hash === 'details')
       return 'trader'
     return 'competition' // 默认为竞赛页面
@@ -97,6 +100,7 @@ function App() {
       'backtest': '/backtest',
       'strategy': '/strategy',
       'debate': '/debate',
+      'logs': '/logs',
       'faq': '/faq',
       'login': '/login',
       'register': '/register',
@@ -160,6 +164,8 @@ function App() {
         setCurrentPage('data')
       } else if (path === '/debate' || hash === 'debate') {
         setCurrentPage('debate')
+      } else if (path === '/logs' || hash === 'logs') {
+        setCurrentPage('logs')
       } else if (
         path === '/dashboard' ||
         hash === 'trader' ||
@@ -388,6 +394,7 @@ function App() {
         'backtest': '/backtest',
         'strategy': '/strategy',
         'debate': '/debate',
+        'logs': '/logs',
         'faq': '/faq',
       }
       const path = pathMap[page]
@@ -478,6 +485,8 @@ function App() {
               <StrategyStudioPage />
             ) : currentPage === 'debate' ? (
               <DebateArenaPage />
+            ) : currentPage === 'logs' ? (
+              <LogsPage />
             ) : (
               <TraderDashboardPage
                 selectedTrader={selectedTrader}

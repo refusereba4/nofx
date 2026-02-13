@@ -589,6 +589,20 @@ export interface ExternalDataSource {
   refresh_secs?: number;
 }
 
+export interface TakeProfitLevelConfig {
+  // 0.5 means +0.5% ROE
+  target_roe_pct: number;
+  // 20 means close 20% position
+  close_pct: number;
+}
+
+export interface StagedStopLossConfig {
+  // -1.6 means -1.6% ROE
+  initial_roe_pct: number;
+  after_tp1_roe_pct: number;
+  after_tp2_roe_pct: number;
+}
+
 export interface RiskControlConfig {
   // Max number of coins held simultaneously (CODE ENFORCED)
   max_positions: number;
@@ -607,6 +621,10 @@ export interface RiskControlConfig {
   min_position_size: number;       // Min position size in USDT (CODE ENFORCED)
   min_risk_reward_ratio: number;   // Min take_profit / stop_loss ratio (AI guided)
   min_confidence: number;          // Min AI confidence to open position (AI guided)
+
+  // Staged exit config (Risk Watcher enforced)
+  take_profit_levels?: TakeProfitLevelConfig[];   // up to 4 levels
+  staged_stop_loss?: StagedStopLossConfig;
 }
 
 // Debate Arena Types
@@ -824,4 +842,16 @@ export interface GridRiskInfo {
   // Breakout state
   breakout_level: string
   breakout_direction: string
+}
+
+export interface RiskAPICallMinuteStats {
+  minute: string
+  counts: Record<string, number>
+  total: number
+}
+
+export interface RiskAPICallLogsResponse {
+  generated_at: string
+  limit: number
+  items: RiskAPICallMinuteStats[]
 }

@@ -21,8 +21,8 @@ type Strategy struct {
 	Description   string    `gorm:"default:''" json:"description"`
 	IsActive      bool      `gorm:"column:is_active;default:false;index" json:"is_active"`
 	IsDefault     bool      `gorm:"column:is_default;default:false" json:"is_default"`
-	IsPublic      bool      `gorm:"column:is_public;default:false;index" json:"is_public"`       // whether visible in strategy market
-	ConfigVisible bool      `gorm:"column:config_visible;default:true" json:"config_visible"`    // whether config details are visible
+	IsPublic      bool      `gorm:"column:is_public;default:false;index" json:"is_public"`    // whether visible in strategy market
+	ConfigVisible bool      `gorm:"column:config_visible;default:true" json:"config_visible"` // whether config details are visible
 	Config        string    `gorm:"not null;default:'{}'" json:"config"`
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`
@@ -133,7 +133,7 @@ type IndicatorConfig struct {
 	EnableMACD        bool `json:"enable_macd"`
 	EnableRSI         bool `json:"enable_rsi"`
 	EnableATR         bool `json:"enable_atr"`
-	EnableBOLL        bool `json:"enable_boll"`         // Bollinger Bands
+	EnableBOLL        bool `json:"enable_boll"` // Bollinger Bands
 	EnableVolume      bool `json:"enable_volume"`
 	EnableOI          bool `json:"enable_oi"`           // open interest
 	EnableFundingRate bool `json:"enable_funding_rate"` // funding rate
@@ -191,13 +191,30 @@ type KlineConfig struct {
 
 // ExternalDataSource external data source configuration
 type ExternalDataSource struct {
-	Name        string            `json:"name"`         // data source name
-	Type        string            `json:"type"`         // type: "api" | "webhook"
-	URL         string            `json:"url"`          // API URL
-	Method      string            `json:"method"`       // HTTP method
+	Name        string            `json:"name"`   // data source name
+	Type        string            `json:"type"`   // type: "api" | "webhook"
+	URL         string            `json:"url"`    // API URL
+	Method      string            `json:"method"` // HTTP method
 	Headers     map[string]string `json:"headers,omitempty"`
 	DataPath    string            `json:"data_path,omitempty"`    // JSON data path
 	RefreshSecs int               `json:"refresh_secs,omitempty"` // refresh interval (seconds)
+}
+
+// TakeProfitLevelConfig one staged take-profit level.
+// Percent units:
+// - TargetROEPct: 0.5 means +0.5% ROE
+// - ClosePct: 20 means close 20% position
+type TakeProfitLevelConfig struct {
+	TargetROEPct float64 `json:"target_roe_pct"`
+	ClosePct     float64 `json:"close_pct"`
+}
+
+// StagedStopLossConfig dynamic stop-loss ROE stages (percent units).
+// Example: -1.6 means -1.6% ROE.
+type StagedStopLossConfig struct {
+	InitialROEPct  float64 `json:"initial_roe_pct"`
+	AfterTP1ROEPct float64 `json:"after_tp1_roe_pct"`
+	AfterTP2ROEPct float64 `json:"after_tp2_roe_pct"`
 }
 
 // RiskControlConfig risk control configuration
@@ -224,6 +241,12 @@ type RiskControlConfig struct {
 	MinRiskRewardRatio float64 `json:"min_risk_reward_ratio"`
 	// Min AI confidence to open position (AI guided)
 	MinConfidence int `json:"min_confidence"`
+
+	// Staged take-profit ladder (up to 4 levels, configured in Strategy UI).
+	// Each level: target ROE (%) + close position (%).
+	TakeProfitLevels []TakeProfitLevelConfig `json:"take_profit_levels,omitempty"`
+	// Dynamic full-position stop-loss stages in ROE (%).
+	StagedStopLoss StagedStopLossConfig `json:"staged_stop_loss,omitempty"`
 }
 
 // NewStrategyStore creates a new StrategyStore
@@ -302,15 +325,26 @@ func GetDefaultStrategyConfig(lang string) StrategyConfig {
 			PriceRankingLimit:    10,
 		},
 		RiskControl: RiskControlConfig{
-			MaxPositions:                    3,   // Max 3 coins simultaneously (CODE ENFORCED)
-			BTCETHMaxLeverage:               5,   // BTC/ETH exchange leverage (AI guided)
-			AltcoinMaxLeverage:              5,   // Altcoin exchange leverage (AI guided)
-			BTCETHMaxPositionValueRatio:     5.0, // BTC/ETH: max position = 5x equity (CODE ENFORCED)
-			AltcoinMaxPositionValueRatio:    1.0, // Altcoin: max position = 1x equity (CODE ENFORCED)
-			MaxMarginUsage:                  0.9, // Max 90% margin usage (CODE ENFORCED)
-			MinPositionSize:                 12,  // Min 12 USDT per position (CODE ENFORCED)
-			MinRiskRewardRatio:              3.0, // Min 3:1 profit/loss ratio (AI guided)
-			MinConfidence:                   75,  // Min 75% confidence (AI guided)
+			MaxPositions:                 3,   // Max 3 coins simultaneously (CODE ENFORCED)
+			BTCETHMaxLeverage:            5,   // BTC/ETH exchange leverage (AI guided)
+			AltcoinMaxLeverage:           5,   // Altcoin exchange leverage (AI guided)
+			BTCETHMaxPositionValueRatio:  5.0, // BTC/ETH: max position = 5x equity (CODE ENFORCED)
+			AltcoinMaxPositionValueRatio: 1.0, // Altcoin: max position = 1x equity (CODE ENFORCED)
+			MaxMarginUsage:               0.9, // Max 90% margin usage (CODE ENFORCED)
+			MinPositionSize:              12,  // Min 12 USDT per position (CODE ENFORCED)
+			MinRiskRewardRatio:           3.0, // Min 3:1 profit/loss ratio (AI guided)
+			MinConfidence:                75,  // Min 75% confidence (AI guided)
+			TakeProfitLevels: []TakeProfitLevelConfig{
+				{TargetROEPct: 0.5, ClosePct: 20},
+				{TargetROEPct: 1.0, ClosePct: 20},
+				{TargetROEPct: 2.0, ClosePct: 30},
+				{TargetROEPct: 3.0, ClosePct: 20},
+			},
+			StagedStopLoss: StagedStopLossConfig{
+				InitialROEPct:  -1.6,
+				AfterTP1ROEPct: -0.55,
+				AfterTP2ROEPct: 0.1,
+			},
 		},
 	}
 
